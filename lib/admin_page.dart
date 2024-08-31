@@ -1,9 +1,12 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:onesignal_flutter/onesignal_flutter.dart';
+import 'package:http/http.dart' as http;
 import 'admins_user_edit.dart';
 import 'announcement_admin_page.dart';
 import 'bottom_bar_admin.dart';
@@ -23,6 +26,7 @@ class AdminPage extends StatefulWidget {
 class _AdminPageState extends State<AdminPage> with SingleTickerProviderStateMixin {
   final FirebaseFirestore _firestore = FirebaseFirestore.instance;
   final FirebaseStorage _storage = FirebaseStorage.instance;
+  late Map<String, List<dynamic>> _previousSignedUsers = {};
 
   String _userName = 'Loading...';
   String _adminId = 'Loading...';
@@ -36,6 +40,7 @@ class _AdminPageState extends State<AdminPage> with SingleTickerProviderStateMix
     _tabController = TabController(length: 3, vsync: this);
     _initializeData();
     _activateAppCheck();
+    _monitorCourses();
   }
 
   @override
@@ -62,6 +67,7 @@ class _AdminPageState extends State<AdminPage> with SingleTickerProviderStateMix
         appleProvider: AppleProvider.deviceCheck,
       );
       OneSignal.initialize("151302a4-82cd-4872-8135-4d15a4f43a83");
+      OneSignal.Notifications.requestPermission(true);
     } catch (e) {
       print('Error activating Firebase App Check: $e');
     }
@@ -143,6 +149,67 @@ class _AdminPageState extends State<AdminPage> with SingleTickerProviderStateMix
       _selectedIndex = index;
     });
     _tabController.animateTo(index);
+  }
+
+  Future<void> _monitorCourses() async {
+    final coursesStream = _firestore.collection('Courses').snapshots();
+    coursesStream.listen((snapshot) {
+      for (var doc in snapshot.docs) {
+        final courseId = doc.id;
+        final signedUsers = doc['signedUsers'] as List<dynamic>? ?? [];
+
+        // Compare with previously stored signedUsers
+        if (_previousSignedUsers.containsKey(courseId)) {
+          final previousSignedUsers = _previousSignedUsers[courseId] ?? [];
+
+          // Determine new and removed users
+          final newUsers = signedUsers.where((user) => !previousSignedUsers.contains(user)).toList();
+          final removedUsers = previousSignedUsers.where((user) => !signedUsers.contains(user)).toList();
+
+          if (newUsers.isNotEmpty) {
+            // Notify about new registrations
+            for (var user in newUsers) {
+              _sendNotification(courseId, 'New Student Registered: $user');
+            }
+          }
+
+          if (removedUsers.isNotEmpty) {
+            // Notify about unregistrations
+            for (var user in removedUsers) {
+              _sendNotification(courseId, 'Student Unregistered: $user');
+            }
+          }
+        }
+
+        _previousSignedUsers[courseId] = signedUsers;
+      }
+    });
+  }
+
+  Future<void> _sendNotification(String courseId, String message) async {
+    final headers = {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Authorization': 'Basic MGZhZjUwOGQtYmY0NS00ZGEwLWFjZjItNzRmODVlMTMzNTJk',
+    };
+
+    final payload = jsonEncode({
+      "app_id": "151302a4-82cd-4872-8135-4d15a4f43a83",
+      "headings": {"en": "Course Update"},
+      "contents": {"en": "$message for course $courseId"},
+      "included_segments": ["All"],
+    });
+
+    final response = await http.post(
+      Uri.parse("https://onesignal.com/api/v1/notifications"),
+      headers: headers,
+      body: payload,
+    );
+
+    if (response.statusCode == 200) {
+      print('Notification sent successfully.');
+    } else {
+      print('Failed to send notification. Status code: ${response.statusCode}');
+    }
   }
 
   @override
